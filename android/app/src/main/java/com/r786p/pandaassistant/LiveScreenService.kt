@@ -155,13 +155,27 @@ class LiveScreenService : Service() {
     }
 
     private fun fetchEphemeralTokenAndConnect() {
-        val request = Request.Builder().url("$backendUrl/live-token")
+        requestLiveToken("$backendUrl/live-token")
+    }
+
+    private fun requestLiveToken(url: String) {
+        val request = Request.Builder().url(url)
             .post(ByteArray(0).toRequestBody("application/json".toMediaType())).build()
         httpClient.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) { showAnswer("🔴 Live token error: ${e.message ?: "network error"}") }
+            override fun onFailure(call: Call, e: IOException) {
+                if (url.endsWith("/live-token")) {
+                    requestLiveToken("$backendUrl/api/live-token")
+                } else {
+                    showAnswer("🔴 Live token network error: ${e.message ?: "network error"}")
+                }
+            }
             override fun onResponse(call: Call, response: Response) {
                 response.use {
                     if (!it.isSuccessful) {
+                        if (url.endsWith("/live-token")) {
+                            requestLiveToken("$backendUrl/api/live-token")
+                            return
+                        }
                         val detail = it.body?.string().orEmpty()
                         showAnswer("🔴 Live token error: HTTP ${it.code} ${detail.take(300)}")
                         return
@@ -391,89 +405,23 @@ class LiveScreenService : Service() {
 
     override fun onDestroy() {
         stopped = true
-        recognizer?.destroy(); recognizer = null; listening = false
-        webSocket?.close(1000, "User stopped Live Screen"); webSocket = null
-        try { audioTrack?.stop() } catch (_: Exception) { }
-        audioTrack?.release(); audioTrack = null
-        virtualDisplay?.release(); virtualDisplay = null
-        imageReader?.close(); imageReader = null
-        mediaProjection?.stop(); mediaProjection = null
-        captureThread?.quitSafely(); captureThread = null; captureHandler = null
-        try {
-            overlayView?.let { if (it.parent != null) windowManager?.removeView(it) }
-            bubble?.let { if (it.parent != null) windowManager?.removeView(it) }
-        } catch (_: Exception) { }
-        overlayView = null; bubble = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        webSocket?.close(1000, "service stopped")
+        webSocket = null
+        recognizer?.destroy()
+        recognizer = null
+        audioTrack?.stop()
+        audioTrack?.release()
+        audioTrack = null
+        try { overlayView?.let { if (it.parent != null) windowManager?.removeView(it) } } catch (_: Exception) { }
+        try { bubble?.let { if (it.parent != null) windowManager?.removeView(it) } } catch (_: Exception) { }
+        imageReader?.close()
+        imageReader = null
+        virtualDisplay?.release()
+        virtualDisplay = null
+        mediaProjection?.stop()
+        mediaProjection = null
+        captureThread?.quitSafely()
+        captureThread = null
         super.onDestroy()
-    }
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    private class PandaBubbleView(context: android.content.Context) : View(context) {
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private var listening = false
-        private var onBubbleClick: (() -> Unit)? = null
-        private var onMicClick: (() -> Unit)? = null
-        private var downX = 0f
-        private var downY = 0f
-
-        init { setLayerType(View.LAYER_TYPE_SOFTWARE, null) }
-        fun setOnBubbleClickListener(listener: () -> Unit) { onBubbleClick = listener }
-        fun setOnMicClickListener(listener: () -> Unit) { onMicClick = listener }
-        fun setListening(value: Boolean) { listening = value; invalidate() }
-
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { downX = event.x; downY = event.y; return true }
-                MotionEvent.ACTION_UP -> {
-                    val dx = event.x - downX; val dy = event.y - downY
-                    if (dx * dx + dy * dy > 100) return true
-                    val cx = width * 0.72f; val cy = height * 0.78f
-                    val r = width * 0.20f
-                    if ((event.x - cx) * (event.x - cx) + (event.y - cy) * (event.y - cy) <= r * r) onMicClick?.invoke()
-                    else onBubbleClick?.invoke()
-                    return true
-                }
-            }
-            return true
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            val w = width.toFloat(); val h = height.toFloat(); val cx = w / 2f; val cy = h / 2f
-            paint.shader = RadialGradient(cx - 10f, cy - 12f, w * .72f, intArrayOf(Color.rgb(255,255,255), Color.rgb(210,218,230), Color.rgb(125,135,150)), floatArrayOf(0f,.48f,1f), Shader.TileMode.CLAMP)
-            paint.setShadowLayer(12f, 0f, 5f, Color.argb(150, 0, 0, 0))
-            canvas.drawCircle(cx, cy, w * .40f, paint)
-            paint.clearShadowLayer(); paint.shader = null
-            paint.color = Color.rgb(35,35,38)
-            canvas.drawCircle(cx - w*.22f, cy - h*.20f, w*.16f, paint)
-            canvas.drawCircle(cx + w*.22f, cy - h*.20f, w*.16f, paint)
-            paint.shader = RadialGradient(cx - 8f, cy - 12f, w*.38f, Color.WHITE, Color.rgb(205,210,218), Shader.TileMode.CLAMP)
-            canvas.drawOval(cx - w*.30f, cy - h*.28f, cx + w*.30f, cy + h*.30f, paint)
-            paint.shader = null
-            paint.color = Color.rgb(30,30,32)
-            canvas.drawOval(cx - w*.17f, cy - h*.04f, cx - w*.08f, cy + h*.08f, paint)
-            canvas.drawOval(cx + w*.08f, cy - h*.04f, cx + w*.17f, cy + h*.08f, paint)
-            paint.color = Color.WHITE
-            canvas.drawCircle(cx - w*.135f, cy - h*.005f, w*.028f, paint)
-            canvas.drawCircle(cx + w*.135f, cy - h*.005f, w*.028f, paint)
-            paint.color = Color.rgb(35,35,38)
-            canvas.drawOval(cx - w*.06f, cy + h*.08f, cx + w*.06f, cy + h*.18f, paint)
-            paint.style = Paint.Style.STROKE; paint.strokeWidth = 2.5f
-            canvas.drawArc(cx - w*.12f, cy + h*.10f, cx + w*.12f, cy + h*.27f, 15f, 150f, false, paint)
-            paint.style = Paint.Style.FILL
-            val micCx = w*.72f; val micCy = h*.78f; val micR = w*.19f
-            paint.shader = LinearGradient(0f, micCy-micR, 0f, micCy+micR, if (listening) Color.rgb(244,80,105) else Color.rgb(91,91,247), Color.rgb(35,35,90), Shader.TileMode.CLAMP)
-            paint.setShadowLayer(7f, 0f, 2f, Color.argb(160,0,0,0))
-            canvas.drawCircle(micCx, micCy, micR, paint)
-            paint.clearShadowLayer(); paint.shader = null
-            paint.color = Color.WHITE
-            paint.strokeWidth = 2.5f; paint.style = Paint.Style.STROKE
-            canvas.drawRoundRect(micCx-w*.055f, micCy-w*.09f, micCx+w*.055f, micCy+w*.06f, w*.055f, w*.055f, paint)
-            canvas.drawArc(micCx-w*.10f, micCy-w*.015f, micCx+w*.10f, micCy+w*.12f, 0f, 180f, false, paint)
-            canvas.drawLine(micCx, micCy+w*.12f, micCx, micCy+w*.17f, paint)
-            paint.style = Paint.Style.FILL
-        }
     }
 }
