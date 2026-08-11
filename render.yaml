@@ -5,7 +5,11 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
-      - key: ANNOTATE_BACKEND_URL
+      - key: GEMINI_API_KEY
         sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
+      - key: GEMINI_LIVE_MODEL
+        value: gemini-3.1-flash-live-preview
       - key: PANDA_TIMEOUT
-        value: "45"
+        value: "60"
