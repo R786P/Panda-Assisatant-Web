@@ -9,6 +9,8 @@
     <application
         android:allowBackup="true"
         android:label="Panda Assistant"
+        android:icon="@drawable/ic_panda_launcher"
+        android:roundIcon="@drawable/ic_panda_launcher"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
         <activity android:name=".MainActivity" android:exported="true">
