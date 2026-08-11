@@ -26,6 +26,7 @@ class LiveScreenService : Service() {
     private var bubble:PandaBubble?=null
     private var bubbleLp:WindowManager.LayoutParams?=null
     private var web:WebView?=null
+    private var webRoot:FrameLayout?=null
     private var webLp:WindowManager.LayoutParams?=null
     private var projection:MediaProjection?=null
     private var display:VirtualDisplay?=null
@@ -72,12 +73,61 @@ class LiveScreenService : Service() {
         bubble?.move={dx,dy->val p=bubbleLp!!;p.x=(p.x+dx.toInt()).coerceIn(0,resources.displayMetrics.widthPixels-dp(74));p.y=(p.y+dy.toInt()).coerceIn(0,resources.displayMetrics.heightPixels-dp(74));wm?.updateViewLayout(bubble,p)}
         wm?.addView(bubble,bubbleLp)
     }
+    private fun closeWeb(){
+        try{
+            webRoot?.let{if(it.parent!=null)wm?.removeView(it)}
+            web?.stopLoading()
+            web?.destroy()
+        }catch(_:Exception){}
+        web=null
+        webRoot=null
+        webLp=null
+    }
     private fun openWeb(){
-        if(web?.parent!=null){wm?.removeView(web);return}
-        web=WebView(this).apply{
-            settings.javaScriptEnabled=true;settings.domStorageEnabled=true;settings.mediaPlaybackRequiresUserGesture=false
+        if(webRoot?.parent!=null){closeWeb();return}
+        wm=wm?:getSystemService(WINDOW_SERVICE)as WindowManager
+
+        val density=resources.displayMetrics.density
+        val root=FrameLayout(this).apply{setBackgroundColor(Color.rgb(25,25,28))}
+        val content=FrameLayout(this)
+        val header=LinearLayout(this).apply{
+            orientation=LinearLayout.HORIZONTAL
+            gravity=Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.rgb(28,30,39))
+            setPadding(dp(12),0,dp(4),0)
+        }
+        val title=TextView(this).apply{
+            text="🐼  Panda Assistant"
+            textSize=16f
+            setTextColor(Color.WHITE)
+            gravity=Gravity.CENTER_VERTICAL
+        }
+        header.addView(title,LinearLayout.LayoutParams(0,dp(48),1f))
+        val min=Button(this).apply{
+            text="−"
+            textSize=22f
+            setTextColor(Color.WHITE)
             setBackgroundColor(Color.TRANSPARENT)
-            addJavascriptInterface(object{ @JavascriptInterface fun screen():String=latestFrame },"PandaNative")
+            setPadding(0,0,0,0)
+            setOnClickListener{minimizeWeb()}
+        }
+        header.addView(min,LinearLayout.LayoutParams(dp(48),dp(48)))
+        val close=Button(this).apply{
+            text="✕"
+            textSize=18f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(0,0,0,0)
+            setOnClickListener{closeWeb()}
+        }
+        header.addView(close,LinearLayout.LayoutParams(dp(48),dp(48)))
+
+        web=WebView(this).apply{
+            settings.javaScriptEnabled=true
+            settings.domStorageEnabled=true
+            settings.mediaPlaybackRequiresUserGesture=false
+            setBackgroundColor(Color.TRANSPARENT)
+            addJavascriptInterface(object{@JavascriptInterface fun screen():String=latestFrame},"PandaNative")
             webViewClient=object:WebViewClient(){
                 override fun onPageFinished(v:WebView,u:String){
                     super.onPageFinished(v,u)
@@ -99,11 +149,84 @@ class LiveScreenService : Service() {
             }
             loadUrl(URL)
         }
-        val w=(resources.displayMetrics.widthPixels*.92f).toInt();val h=(resources.displayMetrics.heightPixels*.78f).toInt()
-        webLp=WindowManager.LayoutParams(w,h,if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,PixelFormat.TRANSLUCENT).apply{gravity=Gravity.TOP or Gravity.START;x=(resources.displayMetrics.widthPixels-w)/2;y=(resources.displayMetrics.heightPixels-h)/2}
-        wm?.addView(web,webLp)
+        content.addView(web,FrameLayout.LayoutParams(-1,-1))
+        root.addView(content,FrameLayout.LayoutParams(-1,0).apply{topMargin=dp(48);bottomMargin=dp(24)})
+        root.addView(header,FrameLayout.LayoutParams(-1,dp(48)).apply{gravity=Gravity.TOP})
+
+        val resize=TextView(this).apply{
+            text="↘"
+            textSize=20f
+            setTextColor(Color.LTGRAY)
+            gravity=Gravity.CENTER
+            setBackgroundColor(Color.rgb(48,50,60))
+            var lastX=0f
+            var lastY=0f
+            setOnTouchListener{_,e->
+                when(e.actionMasked){
+                    MotionEvent.ACTION_DOWN->{lastX=e.rawX;lastY=e.rawY;true}
+                    MotionEvent.ACTION_MOVE->{
+                        val dx=e.rawX-lastX
+                        val dy=e.rawY-lastY
+                        resizeWeb(dx,dy)
+                        lastX=e.rawX;lastY=e.rawY
+                        true
+                    }
+                    else->true
+                }
+            }
+        }
+        root.addView(resize,FrameLayout.LayoutParams(dp(42),dp(24)).apply{gravity=Gravity.BOTTOM or Gravity.END})
+
+        // Drag only from the native header so the web page remains fully interactive.
+        var lastX=0f
+        var lastY=0f
+        header.setOnTouchListener{_,e->
+            when(e.actionMasked){
+                MotionEvent.ACTION_DOWN->{lastX=e.rawX;lastY=e.rawY;true}
+                MotionEvent.ACTION_MOVE->{
+                    val dx=e.rawX-lastX
+                    val dy=e.rawY-lastY
+                    moveWeb(dx,dy)
+                    lastX=e.rawX;lastY=e.rawY
+                    true
+                }
+                else->true
+            }
+        }
+
+        webRoot=root
+        val w=(resources.displayMetrics.widthPixels*.78f).toInt().coerceAtLeast(dp(280))
+        val h=(resources.displayMetrics.heightPixels*.62f).toInt().coerceAtLeast(dp(260))
+        webLp=WindowManager.LayoutParams(w,h,if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,PixelFormat.TRANSLUCENT).apply{
+            gravity=Gravity.TOP or Gravity.START
+            x=(resources.displayMetrics.widthPixels-w)/2
+            y=(resources.displayMetrics.heightPixels-h)/2
+            softInputMode=WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
+        wm?.addView(root,webLp)
     }
-    override fun onDestroy(){try{web?.let{if(it.parent!=null)wm?.removeView(it)};bubble?.let{if(it.parent!=null)wm?.removeView(it)}}catch(_:Exception){};display?.release();reader?.close();projection?.stop();thread?.quitSafely();super.onDestroy()}
+    private fun minimizeWeb(){closeWeb()}
+    private fun moveWeb(dx:Float,dy:Float){
+        val p=webLp?:return
+        val dm=resources.displayMetrics
+        p.x=(p.x+dx.toInt()).coerceIn(0,(dm.widthPixels-p.width).coerceAtLeast(0))
+        p.y=(p.y+dy.toInt()).coerceIn(0,(dm.heightPixels-p.height).coerceAtLeast(0))
+        try{wm?.updateViewLayout(webRoot,p)}catch(_:Exception){}
+    }
+    private fun resizeWeb(dx:Float,dy:Float){
+        val p=webLp?:return
+        val dm=resources.displayMetrics
+        val minW=dp(280)
+        val minH=dp(260)
+        val maxW=(dm.widthPixels*.96f).toInt()
+        val maxH=(dm.heightPixels*.88f).toInt()
+        p.width=(p.width+dx.toInt()).coerceIn(minW,maxW)
+        p.height=(p.height+dy.toInt()).coerceIn(minH,maxH)
+        p.x=p.x.coerceIn(0,(dm.widthPixels-p.width).coerceAtLeast(0))
+        p.y=p.y.coerceIn(0,(dm.heightPixels-p.height).coerceAtLeast(0))
+        try{wm?.updateViewLayout(webRoot,p)}catch(_:Exception){}
+    }
+    override fun onDestroy(){closeWeb();try{bubble?.let{if(it.parent!=null)wm?.removeView(it)}}catch(_:Exception){};display?.release();reader?.close();projection?.stop();thread?.quitSafely();super.onDestroy()}
     override fun onBind(i:Intent?):IBinder?=null
 
     private class PandaBubble(c:Context):View(c){
