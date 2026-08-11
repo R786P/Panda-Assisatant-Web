@@ -3,7 +3,7 @@ import requests
 from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
-BACKEND_URL = os.environ.get("ANNOTATE_BACKEND_URL", "").rstrip("/")
+BACKEND_URL = os.environ.get("ANNOTATE_BACKEND_URL", "https://annotate-agent.onrender.com").rstrip("/")
 TIMEOUT = int(os.environ.get("PANDA_TIMEOUT", "45"))
 
 
