@@ -84,10 +84,9 @@ class LiveScreenService : Service() {
         webLp=null
     }
     private fun openWeb(){
-        if(webRoot?.parent!=null){closeWeb();return}
+        if(webRoot?.parent!=null){return}
         wm=wm?:getSystemService(WINDOW_SERVICE)as WindowManager
 
-        val density=resources.displayMetrics.density
         val root=FrameLayout(this).apply{setBackgroundColor(Color.rgb(25,25,28))}
         val content=FrameLayout(this)
         val header=LinearLayout(this).apply{
@@ -101,6 +100,7 @@ class LiveScreenService : Service() {
             textSize=16f
             setTextColor(Color.WHITE)
             gravity=Gravity.CENTER_VERTICAL
+            setSingleLine(true)
         }
         header.addView(title,LinearLayout.LayoutParams(0,dp(48),1f))
         val min=Button(this).apply{
@@ -126,6 +126,8 @@ class LiveScreenService : Service() {
             settings.javaScriptEnabled=true
             settings.domStorageEnabled=true
             settings.mediaPlaybackRequiresUserGesture=false
+            settings.allowFileAccess=true
+            settings.allowContentAccess=true
             setBackgroundColor(Color.TRANSPARENT)
             addJavascriptInterface(object{@JavascriptInterface fun screen():String=latestFrame},"PandaNative")
             webViewClient=object:WebViewClient(){
@@ -146,11 +148,15 @@ class LiveScreenService : Service() {
                         })();
                     """.trimIndent(),null)
                 }
+                override fun onReceivedError(v:WebView,r:WebResourceRequest,e:WebResourceError){
+                    super.onReceivedError(v,r,e)
+                }
             }
             loadUrl(URL)
         }
         content.addView(web,FrameLayout.LayoutParams(-1,-1))
-        root.addView(content,FrameLayout.LayoutParams(-1,0).apply{topMargin=dp(48);bottomMargin=dp(24)})
+        // IMPORTANT: match-parent height. The previous 0-height content made the entire chat UI invisible.
+        root.addView(content,FrameLayout.LayoutParams(-1,-1).apply{topMargin=dp(48);bottomMargin=dp(24)})
         root.addView(header,FrameLayout.LayoutParams(-1,dp(48)).apply{gravity=Gravity.TOP})
 
         val resize=TextView(this).apply{
@@ -171,16 +177,17 @@ class LiveScreenService : Service() {
                         lastX=e.rawX;lastY=e.rawY
                         true
                     }
+                    MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL->{true}
                     else->true
                 }
             }
         }
         root.addView(resize,FrameLayout.LayoutParams(dp(42),dp(24)).apply{gravity=Gravity.BOTTOM or Gravity.END})
 
-        // Drag only from the native header so the web page remains fully interactive.
+        // Only the title area is draggable. This keeps the − and ✕ buttons clickable.
         var lastX=0f
         var lastY=0f
-        header.setOnTouchListener{_,e->
+        title.setOnTouchListener{_,e->
             when(e.actionMasked){
                 MotionEvent.ACTION_DOWN->{lastX=e.rawX;lastY=e.rawY;true}
                 MotionEvent.ACTION_MOVE->{
@@ -190,13 +197,14 @@ class LiveScreenService : Service() {
                     lastX=e.rawX;lastY=e.rawY
                     true
                 }
+                MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL->{true}
                 else->true
             }
         }
 
         webRoot=root
         val w=(resources.displayMetrics.widthPixels*.78f).toInt().coerceAtLeast(dp(280))
-        val h=(resources.displayMetrics.heightPixels*.62f).toInt().coerceAtLeast(dp(260))
+        val h=(resources.displayMetrics.heightPixels*.62f).toInt().coerceAtLeast(dp(360))
         webLp=WindowManager.LayoutParams(w,h,if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,PixelFormat.TRANSLUCENT).apply{
             gravity=Gravity.TOP or Gravity.START
             x=(resources.displayMetrics.widthPixels-w)/2
@@ -217,7 +225,7 @@ class LiveScreenService : Service() {
         val p=webLp?:return
         val dm=resources.displayMetrics
         val minW=dp(280)
-        val minH=dp(260)
+        val minH=dp(360)
         val maxW=(dm.widthPixels*.96f).toInt()
         val maxH=(dm.heightPixels*.88f).toInt()
         p.width=(p.width+dx.toInt()).coerceIn(minW,maxW)
