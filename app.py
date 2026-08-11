@@ -10,6 +10,7 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip()
 GEMINI_LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview").strip()
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 TIMEOUT = int(os.environ.get("PANDA_TIMEOUT", "60"))
+PANDA_VERSION = "standalone-2026-08-11-live-token-fix"
 
 
 def gemini_error(resp):
@@ -23,6 +24,15 @@ def gemini_error(resp):
     return resp.text[:500]
 
 
+@app.after_request
+def add_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    response.headers["X-Panda-Version"] = PANDA_VERSION
+    return response
+
+
 @app.get("/")
 def index():
     return render_template("index.html", configured=bool(GEMINI_API_KEY))
@@ -30,7 +40,13 @@ def index():
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True, "gemini_configured": bool(GEMINI_API_KEY), "live_screen_backend": bool(GEMINI_API_KEY)})
+    return jsonify({
+        "ok": True,
+        "service": "Panda Assistant",
+        "version": PANDA_VERSION,
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "live_token_endpoint": "/live-token",
+    })
 
 
 @app.post("/api/chat")
@@ -112,8 +128,7 @@ def live_chat():
         return jsonify({"error": f"Gemini connection failed: {exc}"}), 502
 
 
-@app.post("/live-token")
-def live_token():
+def issue_live_token():
     if not GEMINI_API_KEY:
         return jsonify({"error": "GEMINI_API_KEY is not configured on Render."}), 500
     try:
@@ -124,21 +139,45 @@ def live_token():
             "newSessionExpireTime": (now + datetime.timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
             "liveConnectConstraints": {
                 "model": f"models/{GEMINI_LIVE_MODEL}",
-                "config": {"responseModalities": ["AUDIO"], "outputAudioTranscription": {}},
+                "config": {
+                    "responseModalities": ["AUDIO"],
+                    "outputAudioTranscription": {},
+                },
             },
         }
-        resp = requests.post("https://generativelanguage.googleapis.com/v1alpha/auth_tokens", headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}, json=payload, timeout=20)
+        resp = requests.post(
+            "https://generativelanguage.googleapis.com/v1alpha/auth_tokens",
+            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
         if resp.status_code != 200:
             return jsonify({"error": f"Gemini Live token error ({resp.status_code}): {gemini_error(resp)}"}), 502
         data = resp.json()
         token = data.get("name")
         if not token:
             return jsonify({"error": "Gemini Live token response invalid hai."}), 502
-        return jsonify({"token": token, "model": GEMINI_LIVE_MODEL})
+        return jsonify({"token": token, "model": GEMINI_LIVE_MODEL, "backend": PANDA_VERSION})
     except requests.RequestException as exc:
         return jsonify({"error": f"Live token network error: {exc}"}), 502
     except Exception as exc:
         return jsonify({"error": f"Live token failed: {type(exc).__name__}: {exc}"}), 500
+
+
+# Canonical endpoint used by the Android Panda app.
+@app.route("/live-token", methods=["GET", "POST", "OPTIONS"])
+def live_token():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    return issue_live_token()
+
+
+# Compatibility alias so the standalone Android/web clients can use either route.
+@app.route("/api/live-token", methods=["GET", "POST", "OPTIONS"])
+def api_live_token():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    return issue_live_token()
 
 
 if __name__ == "__main__":
