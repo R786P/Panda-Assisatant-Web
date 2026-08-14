@@ -36,6 +36,7 @@ class LiveScreenService : Service() {
     private var reader:android.media.ImageReader?=null
     private var thread:HandlerThread?=null
     private var handler:Handler?=null
+    private val mainHandler=Handler(Looper.getMainLooper())
     private var recognizer:SpeechRecognizer?=null
     private var tts:TextToSpeech?=null
     @Volatile private var latestFrame=""
@@ -77,30 +78,33 @@ class LiveScreenService : Service() {
     private fun showBubble(){
         wm=getSystemService(WINDOW_SERVICE)as WindowManager
         bubble=PandaBubble(this)
-        bubbleLp=WindowManager.LayoutParams(dp(74),dp(74),if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,PixelFormat.TRANSLUCENT).apply{gravity=Gravity.TOP or Gravity.START;x=resources.displayMetrics.widthPixels-dp(88);y=resources.displayMetrics.heightPixels/2}
-        bubble?.tap={openWeb()};bubble?.mic={openWeb()}
-        bubble?.move={dx,dy->val p=bubbleLp!!;p.x=(p.x+dx.toInt()).coerceIn(0,resources.displayMetrics.widthPixels-dp(74));p.y=(p.y+dy.toInt()).coerceIn(0,resources.displayMetrics.heightPixels-dp(74));wm?.updateViewLayout(bubble,p)}
+        bubbleLp=WindowManager.LayoutParams(dp(82),dp(82),if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,PixelFormat.TRANSLUCENT).apply{gravity=Gravity.TOP or Gravity.START;x=resources.displayMetrics.widthPixels-dp(98);y=resources.displayMetrics.heightPixels/2}
+        bubble?.tap={openWeb()};bubble?.mic={openWeb()};bubble?.close={closeFloating()}
+        bubble?.move={dx,dy->val p=bubbleLp!!;p.x=(p.x+dx.toInt()).coerceIn(0,resources.displayMetrics.widthPixels-dp(82));p.y=(p.y+dy.toInt()).coerceIn(0,resources.displayMetrics.heightPixels-dp(82));wm?.updateViewLayout(bubble,p)}
         wm?.addView(bubble,bubbleLp)
     }
+    private fun closeFloating(){closeWeb();try{bubble?.let{if(it.parent!=null)wm?.removeView(it)}}catch(_:Exception){ };bubble=null}
     private fun closeWeb(){try{webRoot?.let{if(it.parent!=null)wm?.removeView(it)};web?.stopLoading();web?.destroy()}catch(_:Exception){};web=null;webRoot=null;webLp=null}
-    private fun speak(text:String){handler?.post{tts?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"panda_reply")}}
+    private fun speak(text:String){mainHandler.post{tts?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"panda_reply")}}
     private fun startHindiVoice(){
-        if(!SpeechRecognizer.isRecognitionAvailable(this)){web?.evaluateJavascript("window.pandaVoiceError('Speech recognition unavailable')",null);return}
-        recognizer?.destroy()
-        recognizer=SpeechRecognizer.createSpeechRecognizer(this)
-        recognizer?.setRecognitionListener(object:RecognitionListener{
-            override fun onReadyForSpeech(p:Bundle?){}
-            override fun onBeginningOfSpeech(){}
-            override fun onRmsChanged(r:Float){}
-            override fun onBufferReceived(b:ByteArray?){}
-            override fun onEndOfSpeech(){}
-            override fun onError(e:Int){web?.post{web?.evaluateJavascript("window.pandaVoiceError('Voice samajh nahi aayi')",null)}}
-            override fun onResults(r:Bundle?){val text=r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?:return;web?.post{web?.evaluateJavascript("window.pandaVoiceResult(${org.json.JSONObject.quote(text)})",null)}}
-            override fun onPartialResults(p:Bundle?){ }
-            override fun onEvent(t:Int,b:Bundle?){ }
-        })
-        val intent=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply{putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);putExtra(RecognizerIntent.EXTRA_LANGUAGE,"hi-IN");putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,"hi-IN");putExtra(RecognizerIntent.EXTRA_MAX_RESULTS,1)}
-        recognizer?.startListening(intent)
+        mainHandler.post{
+            if(!SpeechRecognizer.isRecognitionAvailable(this)){web?.post{web?.evaluateJavascript("window.pandaVoiceError('Speech recognition unavailable')",null)};return@post}
+            recognizer?.destroy()
+            recognizer=SpeechRecognizer.createSpeechRecognizer(this)
+            recognizer?.setRecognitionListener(object:RecognitionListener{
+                override fun onReadyForSpeech(p:Bundle?){web?.post{web?.evaluateJavascript("window.pandaVoiceReady&&window.pandaVoiceReady()",null)}}
+                override fun onBeginningOfSpeech(){}
+                override fun onRmsChanged(r:Float){}
+                override fun onBufferReceived(b:ByteArray?){}
+                override fun onEndOfSpeech(){}
+                override fun onError(e:Int){web?.post{web?.evaluateJavascript("window.pandaVoiceError('Voice samajh nahi aayi. Dobara try karo.')",null)}}
+                override fun onResults(r:Bundle?){val text=r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull();if(!text.isNullOrBlank())web?.post{web?.evaluateJavascript("window.pandaVoiceResult(${org.json.JSONObject.quote(text)})",null)}else web?.post{web?.evaluateJavascript("window.pandaVoiceError('Kuch sunai nahi diya. Dobara try karo.')",null)}}
+                override fun onPartialResults(p:Bundle?){ }
+                override fun onEvent(t:Int,b:Bundle?){ }
+            })
+            val intent=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply{putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);putExtra(RecognizerIntent.EXTRA_LANGUAGE,"hi-IN");putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,"hi-IN");putExtra(RecognizerIntent.EXTRA_MAX_RESULTS,1);putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS,false)}
+            recognizer?.startListening(intent)
+        }
     }
     private fun openWeb(){
         if(webRoot?.parent!=null)return
@@ -122,7 +126,7 @@ class LiveScreenService : Service() {
                 @JavascriptInterface fun speak(text:String){speak(text)}
             },"PandaNative")
             webViewClient=object:WebViewClient(){override fun onPageFinished(v:WebView,u:String){super.onPageFinished(v,u);v.evaluateJavascript("""
-                (function(){const oldFetch=window.fetch;window.fetch=function(url,opt){try{if(String(url).includes('/api/chat')&&opt&&opt.body){const d=JSON.parse(opt.body);const s=window.PandaNative?window.PandaNative.screen():'';if(s){d.image=s;d.mime_type='image/jpeg';opt.body=JSON.stringify(d)}}}catch(e){}return oldFetch(url,opt)}})();
+                (function(){const oldFetch=window.fetch;window.fetch=function(url,opt){try{if(String(url).includes('/api/chat')&&opt&&opt.body){const d=JSON.parse(opt.body);const s=window.PandaNative?window.PandaNative.screen():'';if(s){d.image=s;d.mime_type='image/jpeg';opt.body=JSON.stringify(d)}}}catch(e){}return oldFetch(url,opt,opt)}})();
             """.trimIndent(),null)}}
             loadUrl(URL)
         }
@@ -140,5 +144,4 @@ class LiveScreenService : Service() {
     private fun resizeWeb(dx:Float,dy:Float){val p=webLp?:return;val dm=resources.displayMetrics;val minW=dp(180);val minH=dp(240);val maxW=(dm.widthPixels*.96f).toInt();val maxH=(dm.heightPixels*.88f).toInt();p.width=(p.width+dx.toInt()).coerceIn(minW,maxW);p.height=(p.height+dy.toInt()).coerceIn(minH,maxH);p.x=p.x.coerceIn(0,(dm.widthPixels-p.width).coerceAtLeast(0));p.y=p.y.coerceIn(0,(dm.heightPixels-p.height).coerceAtLeast(0));try{wm?.updateViewLayout(webRoot,p)}catch(_:Exception){}}
     override fun onDestroy(){closeWeb();recognizer?.destroy();tts?.stop();tts?.shutdown();try{bubble?.let{if(it.parent!=null)wm?.removeView(it)}}catch(_:Exception){};display?.release();reader?.close();projection?.stop();thread?.quitSafely();super.onDestroy()}
     override fun onBind(i:Intent?):IBinder?=null
-    private class PandaBubble(c:Context):View(c){private val p=Paint(1);var tap:(()->Unit)?=null;var mic:(()->Unit)?=null;var move:((Float,Float)->Unit)?=null;var sx=0f;var sy=0f;var drag=false;override fun onTouchEvent(e:MotionEvent):Boolean{when(e.actionMasked){MotionEvent.ACTION_DOWN->{sx=e.x;sy=e.y;drag=false;return true};MotionEvent.ACTION_MOVE->{val dx=e.x-sx;val dy=e.y-sy;if(dx*dx+dy*dy>100){drag=true;move?.invoke(dx,dy);sx=e.x;sy=e.y};return true};MotionEvent.ACTION_UP->{if(!drag){val cx=width*.72f;val cy=height*.78f;val r=width*.20f;if((e.x-cx)*(e.x-cx)+(e.y-cy)*(e.y-cy)<r*r)mic?.invoke()else tap?.invoke()};return true}};return true};override fun onDraw(c:Canvas){val w=width.toFloat();val h=height.toFloat();val x=w/2;val y=h/2;p.color=Color.WHITE;p.setShadowLayer(12f,0f,5f,Color.argb(160,0,0,0));c.drawCircle(x,y,w*.4f,p);p.clearShadowLayer();p.color=Color.DKGRAY;c.drawCircle(x-w*.22f,y-h*.2f,w*.16f,p);c.drawCircle(x+w*.22f,y-h*.2f,w*.16f,p);p.color=Color.WHITE;c.drawOval(x-w*.3f,y-h*.28f,x+w*.3f,y+h*.3f,p);p.color=Color.DKGRAY;c.drawOval(x-w*.17f,y-h*.04f,x-w*.08f,y+h*.08f,p);c.drawOval(x+w*.08f,y-h*.04f,x+w*.17f,y+h*.08f,p);p.color=Color.WHITE;c.drawCircle(x-w*.135f,y-h*.005f,w*.028f,p);c.drawCircle(x+w*.135f,y-h*.005f,w*.028f,p);p.color=Color.rgb(91,91,247);c.drawCircle(w*.72f,h*.78f,w*.19f,p)}}
-}
+    private class PandaBubble(c:Context):View(c){private val p=Paint(1);var tap:(()->Unit)?=null;var mic:(()->Unit)?=null;var close:(()->Unit)?=null;var move:((Float,Float)->Unit)?=null;var sx=0f;var sy=0f;var drag=false;override fun onTouchEvent(e:MotionEvent):Boolean{when(e.actionMasked){MotionEvent.ACTION_DOWN->{sx=e.x;sy=e.y;drag=false;return true};MotionEvent.ACTION_MOVE->{val dx=e.x-sx;val dy=e.y-sy;if(dx*dx+dy*dy>100){drag=true;move?.invoke(dx,dy);sx=e.x;sy=e.y};return true};MotionEvent.ACTION_UP->{if(!drag){val w=width.toFloat();val h=height.toFloat();val closeX=w*.86f;val closeY=h*.16f;val cr=w*.13f;val micX=w*.72f;val micY=h*.78f;val mr=w*.20f;if((e.x-closeX)*(e.x-closeX)+(e.y-closeY)*(e.y-closeY)<cr*cr)close?.invoke()else if((e.x-micX)*(e.x-micX)+(e.y-micY)*(e.y-micY)<mr*mr)mic?.invoke()else tap?.invoke()};return true}};return true};override fun onDraw(c:Canvas){val w=width.toFloat();val h=height.toFloat();val x=w/2;val y=h/2;p.color=Color.WHITE;p.setShadowLayer(12f,0f,5f,Color.argb(160,0,0,0));c.drawCircle(x,y,w*.4f,p);p.clearShadowLayer();p.color=Color.DKGRAY;c.drawCircle(x-w*.22f,y-h*.2f,w*.16f,p);c.drawCircle(x+w*.22f,y-h*.2f,w*.16f,p);p.color=Color.WHITE;c.drawOval(x-w*.3f,y-h*.28f,x+w*.3f,y+h*.3f,p);p.color=Color.DKGRAY;c.drawOval(x-w*.17f,y-h*.04f,x-w*.08f,y+h*.08f,p);c.drawOval(x+w*.08f,y-h*.04f,x+w*.17f,y+h*.08f,p);p.color=Color.WHITE;c.drawCircle(x-w*.135f,y-h*.005f,w*.028f,p);c.drawCircle(x+w*.135f,y-h*.005f,w*.028f,p);p.color=Color.rgb(91,91,247);c.drawCircle(w*.72f,h*.78f,w*.19f,p);p.color=Color.rgb(180,55,65);c.drawCircle(w*.86f,h*.16f,w*.13f,p);p.color=Color.WHITE;p.strokeWidth=w*.035f;p.style=Paint.Style.STROKE;c.drawLine(w*.81f,h*.11f,w*.91f,h*.21f,p);c.drawLine(w*.91f,h*.11f,w*.81f,h*.21f,p);p.style=Paint.Style.FILL)}}
