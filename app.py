@@ -12,7 +12,7 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "").strip()
 # xAI uses Grok model IDs. Older OpenAI-style values such as
 # openai/gpt-oss-120b are not valid xAI model IDs, so automatically fall back.
-XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4.5").strip()
+XAI_MODEL = os.environ.get("XAI_MODEL", "openai/gpt-oss-120b").strip()
 if not XAI_MODEL or XAI_MODEL.startswith("openai/") or XAI_MODEL == "gpt-oss-120b":
     XAI_MODEL = "grok-4.5"
 XAI_URL = "https://api.x.ai/v1/chat/completions"
