@@ -9,29 +9,16 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip()
 GEMINI_LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview").strip()
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-XAI_API_KEY = os.environ.get("XAI_API_KEY", "").strip()
-# xAI uses Grok model IDs. Older OpenAI-style values such as
-# openai/gpt-oss-120b are not valid xAI model IDs, so automatically fall back.
-XAI_MODEL = os.environ.get("XAI_MODEL", "openai/gpt-oss-120b").strip()
-if not XAI_MODEL or XAI_MODEL.startswith("openai/") or XAI_MODEL == "gpt-oss-120b":
-    XAI_MODEL = "grok-4.5"
-XAI_URL = "https://api.x.ai/v1/chat/completions"
+
+# Groq configuration. Keep Gemini completely separate.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 TIMEOUT = int(os.environ.get("PANDA_TIMEOUT", "60"))
-PANDA_VERSION = "standalone-2026-08-14-model-selector-v2"
+PANDA_VERSION = "standalone-2026-08-14-groq-backend-v1"
 
 
-def gemini_error(resp):
-    try:
-        data = resp.json()
-        message = data.get("error", {}).get("message")
-        if message:
-            return str(message)[:500]
-    except Exception:
-        pass
-    return resp.text[:500]
-
-
-def xai_error(resp):
+def api_error(resp):
     try:
         data = resp.json()
         message = data.get("error", {}).get("message")
@@ -72,21 +59,20 @@ def health():
         "service": "Panda Assistant",
         "version": PANDA_VERSION,
         "gemini_configured": bool(GEMINI_API_KEY),
-        "grok_configured": bool(XAI_API_KEY),
-        "models": {
-            "gemini": GEMINI_MODEL,
-            "grok": XAI_MODEL,
-        },
+        "groq_configured": bool(GROQ_API_KEY),
+        "models": {"gemini": GEMINI_MODEL, "groq": GROQ_MODEL},
         "live_token_endpoint": "/live-token",
     })
 
 
 @app.get("/api/models")
 def models():
+    # Keep id="grok" for compatibility with the existing Android/Web UI;
+    # internally it is now routed to Groq.
     return jsonify({
         "models": [
             {"id": "gemini", "name": f"Gemini — {GEMINI_MODEL}", "configured": bool(GEMINI_API_KEY)},
-            {"id": "grok", "name": f"Grok — {XAI_MODEL}", "configured": bool(XAI_API_KEY)},
+            {"id": "grok", "name": f"Groq — {GROQ_MODEL}", "configured": bool(GROQ_API_KEY)},
         ],
         "default": "gemini",
     })
@@ -98,51 +84,62 @@ def chat():
     question = str(data.get("question", "")).strip()
     image = str(data.get("image", "")).strip()
     mime_type = str(data.get("mime_type", "image/jpeg")).strip() or "image/jpeg"
-    model = str(data.get("model", "gemini")).strip().lower()
+    selected = str(data.get("model", "gemini")).strip().lower()
+
     if not question:
         return jsonify({"error": "Question is empty."}), 400
-    if model not in {"gemini", "grok"}:
-        model = "gemini"
 
-    if model == "grok":
-        if not XAI_API_KEY:
-            return jsonify({"error": "Grok API key (XAI_API_KEY) is not configured on Render."}), 500
-        content = []
+    # Existing UI sends "grok". Also accept the clearer "groq" name.
+    use_groq = selected in {"grok", "groq"}
+
+    if use_groq:
+        if not GROQ_API_KEY:
+            return jsonify({"error": "Groq API key (GROQ_API_KEY) is not configured on Render."}), 500
+
+        user_content = []
         if image:
             try:
                 base64.b64decode(image, validate=True)
-                content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image}"}})
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{image}"},
+                })
             except Exception:
                 pass
-        content.append({"type": "text", "text": panda_prompt(question)})
+        user_content.append({"type": "text", "text": panda_prompt(question)})
+
         try:
             resp = requests.post(
-                XAI_URL,
-                headers={"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"},
-                json={"model": XAI_MODEL, "messages": [{"role": "user", "content": content}]},
+                GROQ_URL,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": GROQ_MODEL,
+                    "messages": [{"role": "user", "content": user_content}],
+                },
                 timeout=TIMEOUT,
             )
             if resp.status_code != 200:
-                message = xai_error(resp)
-                if resp.status_code == 400 and "Model not found" in message:
-                    message += " — Render me XAI_MODEL ko grok-4.5 (ya latest) rakho."
-                elif resp.status_code in {401, 403}:
-                    message += " — Render me XAI_API_KEY ko xAI Console ki valid API key se check karo."
-                return jsonify({"error": f"Grok API error ({resp.status_code}): {message}"}), 502
+                message = api_error(resp)
+                return jsonify({"error": f"Groq API error ({resp.status_code}): {message}"}), 502
+
             payload = resp.json()
             choices = payload.get("choices") or []
             if not choices:
-                return jsonify({"error": "Grok ne koi reply nahi diya."}), 502
+                return jsonify({"error": "Groq ne koi reply nahi diya."}), 502
             reply = str((choices[0].get("message") or {}).get("content", "")).strip()
             if not reply:
-                return jsonify({"error": "Grok ka text reply empty hai."}), 502
-            return jsonify({"reply": reply, "model": "grok", "model_name": XAI_MODEL})
+                return jsonify({"error": "Groq ka text reply empty hai."}), 502
+            return jsonify({"reply": reply, "model": "groq", "model_name": GROQ_MODEL})
         except requests.RequestException as exc:
-            return jsonify({"error": f"Grok connection failed: {exc}"}), 502
+            return jsonify({"error": f"Groq connection failed: {exc}"}), 502
 
-    # Existing Gemini path intentionally remains the same API/key flow.
+    # Gemini path intentionally preserved.
     if not GEMINI_API_KEY:
         return jsonify({"error": "GEMINI_API_KEY is not configured on Render."}), 500
+
     parts = []
     if image:
         try:
@@ -151,15 +148,25 @@ def chat():
         except Exception:
             pass
     parts.append({"text": panda_prompt(question)})
+
     try:
-        resp = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json={"contents": [{"parts": parts}]}, timeout=TIMEOUT)
+        resp = requests.post(
+            GEMINI_URL,
+            params={"key": GEMINI_API_KEY},
+            json={"contents": [{"parts": parts}]},
+            timeout=TIMEOUT,
+        )
         if resp.status_code != 200:
-            return jsonify({"error": f"Gemini API error ({resp.status_code}): {gemini_error(resp)}"}), 502
+            return jsonify({"error": f"Gemini API error ({resp.status_code}): {api_error(resp)}"}), 502
         payload = resp.json()
         candidates = payload.get("candidates") or []
         if not candidates:
             return jsonify({"error": "Gemini ne koi reply nahi diya."}), 502
-        reply = "\n".join(str(part.get("text", "")).strip() for part in candidates[0].get("content", {}).get("parts", []) if isinstance(part, dict) and str(part.get("text", "")).strip()).strip()
+        reply = "\n".join(
+            str(part.get("text", "")).strip()
+            for part in candidates[0].get("content", {}).get("parts", [])
+            if isinstance(part, dict) and str(part.get("text", "")).strip()
+        ).strip()
         if not reply:
             return jsonify({"error": "Gemini ka text reply empty hai."}), 502
         return jsonify({"reply": reply, "model": "gemini", "model_name": GEMINI_MODEL})
@@ -169,6 +176,7 @@ def chat():
 
 @app.post("/live-chat")
 def live_chat():
+    # Live voice/screen analysis remains Gemini-only and is untouched.
     if not GEMINI_API_KEY:
         return jsonify({"error": "GEMINI_API_KEY is not configured on Render."}), 500
     body = request.get_json(silent=True) or {}
@@ -177,6 +185,7 @@ def live_chat():
     image_mime = str(body.get("mime_type", "image/jpeg")).strip() or "image/jpeg"
     if not question:
         return jsonify({"error": "Question zaroori hai."}), 400
+
     parts = []
     if image_b64:
         try:
@@ -191,15 +200,25 @@ def live_chat():
         "Bina zarurat English me switch mat karo. Passwords, OTPs, API keys aur private secrets ko repeat mat karo.\n\n"
         f"USER QUESTION:\n{question}"
     )})
+
     try:
-        resp = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json={"contents": [{"parts": parts}]}, timeout=TIMEOUT)
+        resp = requests.post(
+            GEMINI_URL,
+            params={"key": GEMINI_API_KEY},
+            json={"contents": [{"parts": parts}]},
+            timeout=TIMEOUT,
+        )
         if resp.status_code != 200:
-            return jsonify({"error": f"Gemini API error ({resp.status_code}): {gemini_error(resp)}"}), 502
+            return jsonify({"error": f"Gemini API error ({resp.status_code}): {api_error(resp)}"}), 502
         payload = resp.json()
         candidates = payload.get("candidates") or []
         if not candidates:
             return jsonify({"error": "Gemini ne koi reply nahi diya."}), 502
-        reply = "\n".join(str(part.get("text", "")).strip() for part in candidates[0].get("content", {}).get("parts", []) if isinstance(part, dict) and str(part.get("text", "")).strip()).strip()
+        reply = "\n".join(
+            str(part.get("text", "")).strip()
+            for part in candidates[0].get("content", {}).get("parts", [])
+            if isinstance(part, dict) and str(part.get("text", "")).strip()
+        ).strip()
         if not reply:
             return jsonify({"error": "Gemini ka text reply empty hai."}), 502
         return jsonify({"reply": reply})
@@ -218,10 +237,7 @@ def issue_live_token():
             "newSessionExpireTime": (now + datetime.timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
             "liveConnectConstraints": {
                 "model": f"models/{GEMINI_LIVE_MODEL}",
-                "config": {
-                    "responseModalities": ["AUDIO"],
-                    "outputAudioTranscription": {},
-                },
+                "config": {"responseModalities": ["AUDIO"], "outputAudioTranscription": {}},
             },
         }
         resp = requests.post(
@@ -231,7 +247,7 @@ def issue_live_token():
             timeout=20,
         )
         if resp.status_code != 200:
-            return jsonify({"error": f"Gemini Live token error ({resp.status_code}): {gemini_error(resp)}"}), 502
+            return jsonify({"error": f"Gemini Live token error ({resp.status_code}): {api_error(resp)}"}), 502
         data = resp.json()
         token = data.get("name")
         if not token:
