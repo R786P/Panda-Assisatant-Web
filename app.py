@@ -10,10 +10,14 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip()
 GEMINI_LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview").strip()
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "").strip()
-XAI_MODEL = os.environ.get("XAI_MODEL", "openai/gpt-oss-120b").strip()
+# xAI uses Grok model IDs. Older OpenAI-style values such as
+# openai/gpt-oss-120b are not valid xAI model IDs, so automatically fall back.
+XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4.5").strip()
+if not XAI_MODEL or XAI_MODEL.startswith("openai/") or XAI_MODEL == "gpt-oss-120b":
+    XAI_MODEL = "grok-4.5"
 XAI_URL = "https://api.x.ai/v1/chat/completions"
 TIMEOUT = int(os.environ.get("PANDA_TIMEOUT", "60"))
-PANDA_VERSION = "standalone-2026-08-14-model-selector"
+PANDA_VERSION = "standalone-2026-08-14-model-selector-v2"
 
 
 def gemini_error(resp):
@@ -119,7 +123,12 @@ def chat():
                 timeout=TIMEOUT,
             )
             if resp.status_code != 200:
-                return jsonify({"error": f"Grok API error ({resp.status_code}): {xai_error(resp)}"}), 502
+                message = xai_error(resp)
+                if resp.status_code == 400 and "Model not found" in message:
+                    message += " — Render me XAI_MODEL ko grok-4.5 (ya latest) rakho."
+                elif resp.status_code in {401, 403}:
+                    message += " — Render me XAI_API_KEY ko xAI Console ki valid API key se check karo."
+                return jsonify({"error": f"Grok API error ({resp.status_code}): {message}"}), 502
             payload = resp.json()
             choices = payload.get("choices") or []
             if not choices:
