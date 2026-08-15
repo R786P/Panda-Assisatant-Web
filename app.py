@@ -12,10 +12,11 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 
 # Groq configuration. Keep Gemini completely separate.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
+# Vision-capable Groq model. It accepts text + image inputs.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b").strip() or "qwen/qwen3.6-27b"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 TIMEOUT = int(os.environ.get("PANDA_TIMEOUT", "60"))
-PANDA_VERSION = "standalone-2026-08-15-groq-string-fix-v2"
+PANDA_VERSION = "standalone-2026-08-15-groq-vision-v1"
 
 
 def api_error(resp):
@@ -96,13 +97,20 @@ def chat():
         if not GROQ_API_KEY:
             return jsonify({"error": "Groq API key (GROQ_API_KEY) is not configured on Render."}), 500
 
-        # Groq text models require messages[].content to be a plain string.
-        # Do not pass Gemini's multipart/array content format to Groq.
-        groq_question = str(panda_prompt(question))
+        # Groq vision model accepts a text + image_url content array.
+        # Android already sends the latest screen as raw base64 JPEG.
+        groq_content = [{"type": "text", "text": panda_prompt(question)}]
         if image:
-            groq_question += (
-                "\n\n[Image attached: this Groq text model is being used, so the image itself is not "
-                "sent to Groq. For image/screen analysis, switch to Gemini.]")
+            try:
+                # Validate the incoming base64 before sending it upstream.
+                base64.b64decode(image, validate=True)
+                data_url = f"data:{mime_type};base64,{image}"
+                groq_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": data_url},
+                })
+            except Exception:
+                return jsonify({"error": "Screen/image data invalid hai. Dobara try karo."}), 400
 
         try:
             resp = requests.post(
@@ -113,7 +121,9 @@ def chat():
                 },
                 json={
                     "model": GROQ_MODEL,
-                    "messages": [{"role": "user", "content": groq_question}],
+                    "messages": [{"role": "user", "content": groq_content}],
+                    "reasoning_format": "hidden",
+                    "max_completion_tokens": 1024,
                 },
                 timeout=TIMEOUT,
             )
