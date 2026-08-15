@@ -39,12 +39,28 @@ class LiveScreenService : Service() {
     private val mainHandler=Handler(Looper.getMainLooper())
     private var recognizer:SpeechRecognizer?=null
     private var tts:TextToSpeech?=null
+    @Volatile private var ttsReady=false
+    @Volatile private var pendingSpeak=""
     @Volatile private var latestFrame=""
 
     override fun onCreate(){
         super.onCreate()
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CH,"Panda Live Screen",NotificationManager.IMPORTANCE_LOW))
-        tts=TextToSpeech(this){status->if(status==TextToSpeech.SUCCESS){tts?.language=Locale("hi","IN");tts?.setSpeechRate(.95f)}}
+        tts=TextToSpeech(this){status->
+            mainHandler.post{
+                ttsReady=status==TextToSpeech.SUCCESS
+                if(ttsReady){
+                    val result=tts?.setLanguage(Locale("hi","IN")) ?: TextToSpeech.LANG_NOT_SUPPORTED
+                    if(result==TextToSpeech.LANG_MISSING_DATA || result==TextToSpeech.LANG_NOT_SUPPORTED){
+                        tts?.setLanguage(Locale.getDefault())
+                    }
+                    tts?.setSpeechRate(.95f)
+                    val pending=pendingSpeak
+                    pendingSpeak=""
+                    if(pending.isNotBlank())safeSpeak(pending)
+                }
+            }
+        }
     }
     override fun onStartCommand(i:Intent?,f:Int,s:Int):Int{
         val code=i?.getIntExtra(EXTRA_RESULT_CODE,0)?:0
@@ -79,35 +95,55 @@ class LiveScreenService : Service() {
         wm=getSystemService(WINDOW_SERVICE)as WindowManager
         bubble=PandaBubble(this)
         bubbleLp=WindowManager.LayoutParams(dp(82),dp(82),if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,PixelFormat.TRANSLUCENT).apply{gravity=Gravity.TOP or Gravity.START;x=resources.displayMetrics.widthPixels-dp(98);y=resources.displayMetrics.heightPixels/2}
-        bubble?.tap={openWeb()};bubble?.mic={openWeb()};bubble?.close={closeFloating()}
+        bubble?.tap={openWeb(false)}
+        bubble?.mic={openWeb(true)}
+        bubble?.close={closeFloating()}
         bubble?.move={dx,dy->val p=bubbleLp!!;p.x=(p.x+dx.toInt()).coerceIn(0,resources.displayMetrics.widthPixels-dp(82));p.y=(p.y+dy.toInt()).coerceIn(0,resources.displayMetrics.heightPixels-dp(82));wm?.updateViewLayout(bubble,p)}
         wm?.addView(bubble,bubbleLp)
     }
-    private fun closeFloating(){closeWeb();try{bubble?.let{if(it.parent!=null)wm?.removeView(it)}}catch(_:Exception){ };bubble=null}
+    private fun closeFloating(){closeWeb();try{bubble?.let{if(it.parent!=null)wm?.removeView(it)}}catch(_:Exception){};bubble=null}
     private fun closeWeb(){try{webRoot?.let{if(it.parent!=null)wm?.removeView(it)};web?.stopLoading();web?.destroy()}catch(_:Exception){};web=null;webRoot=null;webLp=null}
-    private fun speak(text:String){mainHandler.post{tts?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"panda_reply")}}
-    private fun startHindiVoice(){
-        mainHandler.post{
-            if(!SpeechRecognizer.isRecognitionAvailable(this)){web?.post{web?.evaluateJavascript("window.pandaVoiceError('Speech recognition unavailable')",null)};return@post}
-            recognizer?.destroy()
-            recognizer=SpeechRecognizer.createSpeechRecognizer(this)
-            recognizer?.setRecognitionListener(object:RecognitionListener{
-                override fun onReadyForSpeech(p:Bundle?){web?.post{web?.evaluateJavascript("window.pandaVoiceReady&&window.pandaVoiceReady()",null)}}
-                override fun onBeginningOfSpeech(){}
-                override fun onRmsChanged(r:Float){}
-                override fun onBufferReceived(b:ByteArray?){}
-                override fun onEndOfSpeech(){}
-                override fun onError(e:Int){web?.post{web?.evaluateJavascript("window.pandaVoiceError('Voice samajh nahi aayi. Dobara try karo.')",null)}}
-                override fun onResults(r:Bundle?){val text=r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull();if(!text.isNullOrBlank())web?.post{web?.evaluateJavascript("window.pandaVoiceResult(${org.json.JSONObject.quote(text)})",null)}else web?.post{web?.evaluateJavascript("window.pandaVoiceError('Kuch sunai nahi diya. Dobara try karo.')",null)}}
-                override fun onPartialResults(p:Bundle?){ }
-                override fun onEvent(t:Int,b:Bundle?){ }
-            })
-            val intent=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply{putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);putExtra(RecognizerIntent.EXTRA_LANGUAGE,"hi-IN");putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,"hi-IN");putExtra(RecognizerIntent.EXTRA_MAX_RESULTS,1);putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS,false)}
-            recognizer?.startListening(intent)
+    private fun notifyVoiceError(message:String){mainHandler.post{try{web?.evaluateJavascript("window.pandaVoiceError(${org.json.JSONObject.quote(message)})",null)}catch(_:Exception){}}}
+    private fun safeSpeak(text:String){
+        if(text.isBlank())return
+        if(!ttsReady){pendingSpeak=text;return}
+        try{tts?.speak(text,TextToSpeech.QUEUE_FLUSH,null,"panda_reply")}catch(_:Throwable){
+            pendingSpeak=text
+            ttsReady=false
         }
     }
-    private fun openWeb(){
-        if(webRoot?.parent!=null)return
+    private fun speak(text:String){mainHandler.post{safeSpeak(text)}}
+    private fun startHindiVoice(){
+        mainHandler.post{
+            try{
+                if(ContextCompatCompat.hasRecordAudio(this).not()){
+                    notifyVoiceError("Microphone permission allow karo.")
+                    return@post
+                }
+                if(!SpeechRecognizer.isRecognitionAvailable(this)){
+                    notifyVoiceError("Speech recognition unavailable hai.")
+                    return@post
+                }
+                recognizer?.destroy()
+                recognizer=SpeechRecognizer.createSpeechRecognizer(this)
+                recognizer?.setRecognitionListener(object:RecognitionListener{
+                    override fun onReadyForSpeech(p:Bundle?){web?.post{web?.evaluateJavascript("window.pandaVoiceReady&&window.pandaVoiceReady()",null)}}
+                    override fun onBeginningOfSpeech(){}
+                    override fun onRmsChanged(r:Float){}
+                    override fun onBufferReceived(b:ByteArray?){}
+                    override fun onEndOfSpeech(){}
+                    override fun onError(e:Int){notifyVoiceError("Voice samajh nahi aayi. Dobara try karo.")}
+                    override fun onResults(r:Bundle?){val text=r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull();if(!text.isNullOrBlank())web?.post{web?.evaluateJavascript("window.pandaVoiceResult(${org.json.JSONObject.quote(text)})",null)}else notifyVoiceError("Kuch sunai nahi diya. Dobara try karo.")}
+                    override fun onPartialResults(p:Bundle?){ }
+                    override fun onEvent(t:Int,b:Bundle?){ }
+                })
+                val intent=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply{putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);putExtra(RecognizerIntent.EXTRA_LANGUAGE,"hi-IN");putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,"hi-IN");putExtra(RecognizerIntent.EXTRA_MAX_RESULTS,1);putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS,false)}
+                recognizer?.startListening(intent)
+            }catch(_:Throwable){notifyVoiceError("Microphone start nahi ho paya. Permission/check karke dobara try karo.")}
+        }
+    }
+    private fun openWeb(startVoice:Boolean){
+        if(webRoot?.parent!=null){if(startVoice)mainHandler.postDelayed({startHindiVoice()},250);return}
         wm=wm?:getSystemService(WINDOW_SERVICE)as WindowManager
         val root=FrameLayout(this).apply{setBackgroundColor(Color.rgb(25,25,28))}
         val content=FrameLayout(this)
@@ -123,11 +159,11 @@ class LiveScreenService : Service() {
             addJavascriptInterface(object{
                 @JavascriptInterface fun screen():String=latestFrame
                 @JavascriptInterface fun startVoice(){startHindiVoice()}
-                @JavascriptInterface fun speak(text:String){speak(text)}
+                @JavascriptInterface fun speak(text:String){this@LiveScreenService.speak(text)}
             },"PandaNative")
             webViewClient=object:WebViewClient(){override fun onPageFinished(v:WebView,u:String){super.onPageFinished(v,u);v.evaluateJavascript("""
                 (function(){const oldFetch=window.fetch;window.fetch=function(url,opt){try{if(String(url).includes('/api/chat')&&opt&&opt.body){const d=JSON.parse(opt.body);const s=window.PandaNative?window.PandaNative.screen():'';if(s){d.image=s;d.mime_type='image/jpeg';opt.body=JSON.stringify(d)}}}catch(e){}return oldFetch(url,opt)}})();
-            """.trimIndent(),null)}}
+            """.trimIndent(),null);if(startVoice)mainHandler.postDelayed({startHindiVoice()},350)}}
             loadUrl(URL)
         }
         content.addView(web,FrameLayout.LayoutParams(-1,-1));root.addView(content,FrameLayout.LayoutParams(-1,-1).apply{topMargin=dp(48);bottomMargin=dp(24)});root.addView(header,FrameLayout.LayoutParams(-1,dp(48)).apply{gravity=Gravity.TOP})
@@ -145,4 +181,8 @@ class LiveScreenService : Service() {
     override fun onDestroy(){closeWeb();recognizer?.destroy();tts?.stop();tts?.shutdown();try{bubble?.let{if(it.parent!=null)wm?.removeView(it)}}catch(_:Exception){};display?.release();reader?.close();projection?.stop();thread?.quitSafely();super.onDestroy()}
     override fun onBind(i:Intent?):IBinder?=null
     private class PandaBubble(c:Context):View(c){private val p=Paint(1);var tap:(()->Unit)?=null;var mic:(()->Unit)?=null;var close:(()->Unit)?=null;var move:((Float,Float)->Unit)?=null;var sx=0f;var sy=0f;var drag=false;override fun onTouchEvent(e:MotionEvent):Boolean{when(e.actionMasked){MotionEvent.ACTION_DOWN->{sx=e.x;sy=e.y;drag=false;return true};MotionEvent.ACTION_MOVE->{val dx=e.x-sx;val dy=e.y-sy;if(dx*dx+dy*dy>100){drag=true;move?.invoke(dx,dy);sx=e.x;sy=e.y};return true};MotionEvent.ACTION_UP->{if(!drag){val w=width.toFloat();val h=height.toFloat();val closeX=w*.86f;val closeY=h*.16f;val cr=w*.13f;val micX=w*.72f;val micY=h*.78f;val mr=w*.20f;if((e.x-closeX)*(e.x-closeX)+(e.y-closeY)*(e.y-closeY)<cr*cr)close?.invoke()else if((e.x-micX)*(e.x-micX)+(e.y-micY)*(e.y-micY)<mr*mr)mic?.invoke()else tap?.invoke()};return true}};return true};override fun onDraw(c:Canvas){val w=width.toFloat();val h=height.toFloat();val x=w/2;val y=h/2;p.color=Color.WHITE;p.setShadowLayer(12f,0f,5f,Color.argb(160,0,0,0));c.drawCircle(x,y,w*.4f,p);p.clearShadowLayer();p.color=Color.DKGRAY;c.drawCircle(x-w*.22f,y-h*.2f,w*.16f,p);c.drawCircle(x+w*.22f,y-h*.2f,w*.16f,p);p.color=Color.WHITE;c.drawOval(x-w*.3f,y-h*.28f,x+w*.3f,y+h*.3f,p);p.color=Color.DKGRAY;c.drawOval(x-w*.17f,y-h*.04f,x-w*.08f,y+h*.08f,p);c.drawOval(x+w*.08f,y-h*.04f,x+w*.17f,y+h*.08f,p);p.color=Color.WHITE;c.drawCircle(x-w*.135f,y-h*.005f,w*.028f,p);c.drawCircle(x+w*.135f,y-h*.005f,w*.028f,p);p.color=Color.rgb(91,91,247);c.drawCircle(w*.72f,h*.78f,w*.19f,p);p.color=Color.rgb(180,55,65);c.drawCircle(w*.86f,h*.16f,w*.13f,p);p.color=Color.WHITE;p.strokeWidth=w*.035f;p.style=Paint.Style.STROKE;c.drawLine(w*.81f,h*.11f,w*.91f,h*.21f,p);c.drawLine(w*.91f,h*.11f,w*.81f,h*.21f,p);p.style=Paint.Style.FILL}}
+}
+
+private object ContextCompatCompat {
+    fun hasRecordAudio(context: Context): Boolean = android.content.pm.PackageManager.PERMISSION_GRANTED == androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO)
 }
