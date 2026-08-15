@@ -15,7 +15,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 TIMEOUT = int(os.environ.get("PANDA_TIMEOUT", "60"))
-PANDA_VERSION = "standalone-2026-08-14-groq-backend-v1"
+PANDA_VERSION = "standalone-2026-08-15-groq-string-fix-v1"
 
 
 def api_error(resp):
@@ -96,17 +96,14 @@ def chat():
         if not GROQ_API_KEY:
             return jsonify({"error": "Groq API key (GROQ_API_KEY) is not configured on Render."}), 500
 
-        user_content = []
+        # Groq Chat Completions expects messages[].content to be a string for
+        # the text models used by this app. Gemini's multipart content format
+        # must never be passed through to Groq.
+        groq_question = panda_prompt(question)
         if image:
-            try:
-                base64.b64decode(image, validate=True)
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{image}"},
-                })
-            except Exception:
-                pass
-        user_content.append({"type": "text", "text": panda_prompt(question)})
+            groq_question += (
+                "\n\n[Image attached: this Groq text model is being used, so the image itself is not "
+                "sent to Groq. For image/screen analysis, switch to Gemini.]")
 
         try:
             resp = requests.post(
@@ -117,7 +114,7 @@ def chat():
                 },
                 json={
                     "model": GROQ_MODEL,
-                    "messages": [{"role": "user", "content": user_content}],
+                    "messages": [{"role": "user", "content": groq_question}],
                 },
                 timeout=TIMEOUT,
             )
