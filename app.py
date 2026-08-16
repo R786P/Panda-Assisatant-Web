@@ -9,14 +9,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip()
 GEMINI_LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview").strip()
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-
-# Groq configuration. Keep Gemini completely separate.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
-# Vision-capable Groq model. It accepts text + image inputs.
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b").strip() or "qwen/qwen3.6-27b"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 TIMEOUT = int(os.environ.get("PANDA_TIMEOUT", "60"))
-PANDA_VERSION = "standalone-2026-08-15-groq-vision-v1"
+PANDA_VERSION = "standalone-2026-08-16-groq-multiframe-v1"
 
 
 def api_error(resp):
@@ -33,7 +30,8 @@ def api_error(resp):
 def panda_prompt(question):
     return (
         "Tum Panda Assistant ho. User Hindi ya Hinglish me baat kare to natural Hindi/Hinglish me jawab do. "
-        "Attached image ko dhyan se dekho aur sawal ka direct, useful jawab do. "
+        "Attached image/screen frames ko dhyan se dekho aur sawal ka direct, useful jawab do. "
+        "Agar multiple screen frames diye gaye hain to unhe chronological sequence samjho aur batao screen par kya badla ya kya ho raha hai. "
         "Bina zarurat English me switch mat karo. Passwords, OTPs, API keys aur private secrets ko repeat mat karo.\n\n"
         f"USER QUESTION:\n{question}"
     )
@@ -68,8 +66,6 @@ def health():
 
 @app.get("/api/models")
 def models():
-    # Keep id="grok" for compatibility with the existing Android/Web UI;
-    # internally it is now routed to Groq.
     return jsonify({
         "models": [
             {"id": "gemini", "name": f"Gemini — {GEMINI_MODEL}", "configured": bool(GEMINI_API_KEY)},
@@ -85,32 +81,29 @@ def chat():
     question = str(data.get("question", "")).strip()
     image = str(data.get("image", "")).strip()
     mime_type = str(data.get("mime_type", "image/jpeg")).strip() or "image/jpeg"
+    raw_frames = data.get("frames") or []
+    frames = [str(x).strip() for x in raw_frames if str(x).strip()]
     selected = str(data.get("model", "gemini")).strip().lower()
 
     if not question:
         return jsonify({"error": "Question is empty."}), 400
 
-    # Existing UI sends "grok". Also accept the clearer "groq" name.
     use_groq = selected in {"grok", "groq"}
 
     if use_groq:
         if not GROQ_API_KEY:
             return jsonify({"error": "Groq API key (GROQ_API_KEY) is not configured on Render."}), 500
 
-        # Groq vision model accepts a text + image_url content array.
-        # Android already sends the latest screen as raw base64 JPEG.
         groq_content = [{"type": "text", "text": panda_prompt(question)}]
-        if image:
-            try:
-                # Validate the incoming base64 before sending it upstream.
-                base64.b64decode(image, validate=True)
-                data_url = f"data:{mime_type};base64,{image}"
-                groq_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": data_url},
-                })
-            except Exception:
-                return jsonify({"error": "Screen/image data invalid hai. Dobara try karo."}), 400
+        try:
+            # Prefer the recent chronological frame sequence when available.
+            valid_frames = frames[-6:] if frames else ([image] if image else [])
+            for frame in valid_frames:
+                base64.b64decode(frame, validate=True)
+                data_url = f"data:image/jpeg;base64,{frame}"
+                groq_content.append({"type": "image_url", "image_url": {"url": data_url}})
+        except Exception:
+            return jsonify({"error": "Screen/image data invalid hai. Dobara try karo."}), 400
 
         try:
             resp = requests.post(
@@ -130,7 +123,6 @@ def chat():
             if resp.status_code != 200:
                 message = api_error(resp)
                 return jsonify({"error": f"Groq API error ({resp.status_code}): {message}"}), 502
-
             payload = resp.json()
             choices = payload.get("choices") or []
             if not choices:
@@ -138,11 +130,10 @@ def chat():
             reply = str((choices[0].get("message") or {}).get("content", "")).strip()
             if not reply:
                 return jsonify({"error": "Groq ka text reply empty hai."}), 502
-            return jsonify({"reply": reply, "model": "groq", "model_name": GROQ_MODEL})
+            return jsonify({"reply": reply, "model": "groq", "model_name": GROQ_MODEL, "frames_analyzed": len(valid_frames)})
         except requests.RequestException as exc:
             return jsonify({"error": f"Groq connection failed: {exc}"}), 502
 
-    # Gemini path intentionally preserved.
     if not GEMINI_API_KEY:
         return jsonify({"error": "GEMINI_API_KEY is not configured on Render."}), 500
 
@@ -182,7 +173,6 @@ def chat():
 
 @app.post("/live-chat")
 def live_chat():
-    # Live voice/screen analysis remains Gemini-only and is untouched.
     if not GEMINI_API_KEY:
         return jsonify({"error": "GEMINI_API_KEY is not configured on Render."}), 500
     body = request.get_json(silent=True) or {}
@@ -191,7 +181,6 @@ def live_chat():
     image_mime = str(body.get("mime_type", "image/jpeg")).strip() or "image/jpeg"
     if not question:
         return jsonify({"error": "Question zaroori hai."}), 400
-
     parts = []
     if image_b64:
         try:
@@ -206,7 +195,6 @@ def live_chat():
         "Bina zarurat English me switch mat karo. Passwords, OTPs, API keys aur private secrets ko repeat mat karo.\n\n"
         f"USER QUESTION:\n{question}"
     )})
-
     try:
         resp = requests.post(
             GEMINI_URL,
